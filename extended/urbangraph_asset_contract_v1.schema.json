@@ -1,0 +1,77 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://twinbridge.lboro.ac.uk/schemas/urbangraph-asset/v1",
+  "title": "UrbanGraph Asset Contract v1 (feasibility extension)",
+  "description": "Versioned JSON contract between the UrbanGraph ingestion pipeline and the Three.js viewer. v1 adds stable OSM identifiers, provenance, and RESERVED extension fields (lifecycle, dpp_refs, federation) that are explicitly null/empty until the corresponding systems exist. Future versions MUST remain backward-compatible readers of v1 reserved fields.",
+  "type": "object",
+  "required": ["contract_version", "generated_at", "provenance", "buildings", "roads", "nodes"],
+  "properties": {
+    "contract_version": {"const": "urbangraph-asset/v1"},
+    "generated_at": {"type": "string", "format": "date-time"},
+    "provenance": {
+      "type": "object",
+      "required": ["spatial_source", "licence", "bbox"],
+      "properties": {
+        "spatial_source": {"type": "string"},
+        "overpass_endpoint": {"type": "string"},
+        "bbox": {"type": "object"},
+        "osm_data_timestamp": {"type": "string"},
+        "licence": {"type": "string"},
+        "nodes_note": {"type": "string"},
+        "height_fallback_note": {"type": "string"},
+        "identity_note": {"type": "string"}
+      }
+    },
+    "buildings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "kind", "footprint", "height", "height_source", "tags", "lifecycle", "dpp_refs", "federation"],
+        "properties": {
+          "id": {"type": "string", "pattern": "^osm:way/\\d+$",
+                 "description": "OSM way id — spatial feature identity only; NOT a UPRN or legal asset id"},
+          "kind": {"const": "building"},
+          "footprint": {"type": "array", "minItems": 3,
+                        "items": {"type": "array", "prefixItems": [{"type": "number"}, {"type": "number"}]}},
+          "height": {"type": "number"},
+          "height_source": {"type": "string",
+                            "description": "osm_tag:height | osm_tag:building:levels x 3.2m estimate | synthetic_fallback"},
+          "tags": {"type": "object"},
+          "lifecycle": {"type": "null",
+                        "description": "RESERVED v1: future building lifecycle state object from the P2 twin (e.g. {stage, valid_from, event_ref}). Null until that system exists."},
+          "dpp_refs": {"type": "array", "maxItems": 0,
+                       "description": "RESERVED v1: future array of product-passport references from the P3 DPP service. Empty until that system exists."},
+          "federation": {"type": "null",
+                         "description": "RESERVED v1: future TwinBridge federation result/trace reference. Null until that system exists."}
+        }
+      }
+    },
+    "roads": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "kind", "path"],
+        "properties": {
+          "id": {"type": "string", "pattern": "^osm:way/\\d+$"},
+          "kind": {"const": "road"},
+          "path": {"type": "array"},
+          "highway": {"type": "string"}
+        }
+      }
+    },
+    "nodes": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "type", "x", "y", "synthetic"],
+        "properties": {
+          "id": {"type": "string", "pattern": "^synthetic:node/\\d+$"},
+          "type": {"enum": ["cctv", "streetlight", "air_quality", "gateway"]},
+          "x": {"type": "number"}, "y": {"type": "number"},
+          "protocol": {"type": "string"},
+          "synthetic": {"const": true}
+        }
+      }
+    }
+  }
+}

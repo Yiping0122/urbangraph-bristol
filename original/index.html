@@ -1,0 +1,185 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>UrbanGraph — Bristol prototype</title>
+<style>
+  :root{
+    --ink:#1e2a32; --panel:rgba(255,255,255,.92); --line:#c8ced4;
+    --cctv:#d64550; --light:#e8a13d; --aq:#3fa66a; --gw:#3d6fe8;
+  }
+  html,body{margin:0;height:100%;overflow:hidden;
+    font:13px/1.45 "Segoe UI",system-ui,-apple-system,sans-serif;color:var(--ink)}
+  #app{position:fixed;inset:0}
+  .panel{position:absolute;background:var(--panel);border:1px solid var(--line);
+    border-radius:6px;padding:10px 14px;backdrop-filter:blur(4px)}
+  #title{top:14px;left:14px}
+  #title h1{margin:0;font-size:15px;font-weight:600;letter-spacing:.2px}
+  #title p{margin:2px 0 0;font-size:11.5px;color:#5a6772}
+  #legend{bottom:14px;left:14px}
+  #legend .row{display:flex;align-items:center;gap:8px;margin:3px 0}
+  #legend .dot{width:10px;height:10px;border-radius:50%}
+  #legend .note{margin-top:6px;font-size:10.5px;color:#5a6772;max-width:230px}
+  #shot{position:absolute;top:14px;right:14px;border:1px solid var(--line);
+    background:var(--panel);color:var(--ink);border-radius:6px;
+    padding:8px 14px;font:600 12.5px inherit;cursor:pointer}
+  #shot:hover{background:#fff}
+  #shot:focus-visible{outline:2px solid var(--gw);outline-offset:2px}
+  #status{position:absolute;inset:0;display:flex;align-items:center;
+    justify-content:center;color:#5a6772;background:#e8ecef}
+</style>
+</head>
+<body>
+<div id="app"></div>
+<div id="status">Loading bristol_data.json…</div>
+
+<div id="title" class="panel">
+  <h1>UrbanGraph · Bristol, UK</h1>
+  <p>Prototype demonstrator — smart-city node layer</p>
+</div>
+
+<div id="legend" class="panel">
+  <div class="row"><span class="dot" style="background:var(--cctv)"></span>CCTV <span style="color:#5a6772">· Wi-Fi / Cellular</span></div>
+  <div class="row"><span class="dot" style="background:var(--light)"></span>Streetlight <span style="color:#5a6772">· NB-IoT / LoRaWAN</span></div>
+  <div class="row"><span class="dot" style="background:var(--aq)"></span>Air-quality sensor <span style="color:#5a6772">· LoRaWAN</span></div>
+  <div class="row"><span class="dot" style="background:var(--gw)"></span>Gateway <span style="color:#5a6772">· Cellular</span></div>
+  <div class="note">Buildings &amp; roads: OpenStreetMap / Bristol Open Data. Node locations are synthetic, for demonstration.</div>
+</div>
+
+<button id="shot" type="button">Save screenshot</button>
+
+<script type="importmap">
+{"imports":{
+  "three":"https://unpkg.com/three@0.160.0/build/three.module.js",
+  "three/addons/":"https://unpkg.com/three@0.160.0/examples/jsm/"
+}}
+</script>
+<script type="module">
+import * as THREE from 'three';
+import {OrbitControls} from 'three/addons/controls/OrbitControls.js';
+import * as BufferGeometryUtils from 'three/addons/utils/BufferGeometryUtils.js';
+
+const COLORS = {cctv:0xd64550, streetlight:0xe8a13d, air_quality:0x3fa66a, gateway:0x3d6fe8};
+const HEIGHTS = {cctv:5, streetlight:7, air_quality:4, gateway:14};
+const RADIUS  = {cctv:2.4, streetlight:1.8, air_quality:1.8, gateway:3.2};
+
+const app = document.getElementById('app');
+const renderer = new THREE.WebGLRenderer({antialias:true, preserveDrawingBuffer:true});
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+app.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0xe8ecef);
+scene.fog = new THREE.Fog(0xe8ecef, 900, 2600);
+
+const camera = new THREE.PerspectiveCamera(50, innerWidth/innerHeight, 1, 6000);
+camera.position.set(420, 380, 520);
+
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.target.set(0, 0, 0);
+controls.maxPolarAngle = Math.PI * 0.49;
+controls.enableDamping = true;
+
+scene.add(new THREE.HemisphereLight(0xffffff, 0xb9c2c9, 0.85));
+const sun = new THREE.DirectionalLight(0xffffff, 1.6);
+sun.position.set(-500, 700, 300);
+sun.castShadow = true;
+sun.shadow.mapSize.set(2048, 2048);
+Object.assign(sun.shadow.camera, {left:-900, right:900, top:900, bottom:-900, far:2500});
+scene.add(sun);
+
+const ground = new THREE.Mesh(
+  new THREE.PlaneGeometry(4000, 4000),
+  new THREE.MeshLambertMaterial({color:0xdde2e6}));
+ground.rotation.x = -Math.PI/2;
+ground.receiveShadow = true;
+scene.add(ground);
+
+fetch('bristol_data.json').then(r => {
+  if (!r.ok) throw new Error(r.status);
+  return r.json();
+}).then(build).catch(() => {
+  document.getElementById('status').textContent =
+    'Could not load bristol_data.json — run fetch_bristol.py first, then serve this folder (python -m http.server).';
+});
+
+function build(data){
+  document.getElementById('status').remove();
+
+  // Buildings: extrude footprints, merge into one mesh
+  const geoms = [];
+  for (const b of data.buildings){
+    const pts = b.footprint.map(([x,y]) => new THREE.Vector2(x, y));
+    if (pts.length < 3) continue;
+    const shape = new THREE.Shape(pts);
+    const g = new THREE.ExtrudeGeometry(shape, {depth:b.height, bevelEnabled:false});
+    g.rotateX(-Math.PI/2);
+    geoms.push(g);
+  }
+  const city = new THREE.Mesh(
+    BufferGeometryUtils.mergeGeometries(geoms, false),
+    new THREE.MeshStandardMaterial({color:0xf7f8f9, roughness:.9, metalness:0}));
+  city.castShadow = city.receiveShadow = true;
+  scene.add(city);
+
+  // Roads: flat dark lines slightly above ground
+  const roadMat = new THREE.LineBasicMaterial({color:0x7a8590});
+  const roadPts = [];
+  for (const rd of data.roads)
+    for (let i=0;i<rd.path.length-1;i++){
+      roadPts.push(new THREE.Vector3(rd.path[i][0], .4, -rd.path[i][1]));
+      roadPts.push(new THREE.Vector3(rd.path[i+1][0], .4, -rd.path[i+1][1]));
+    }
+  scene.add(new THREE.LineSegments(
+    new THREE.BufferGeometry().setFromPoints(roadPts), roadMat));
+
+  // Nodes: instanced spheres per type + stem lines
+  const byType = {};
+  for (const n of data.nodes) (byType[n.type] ??= []).push(n);
+  const stemPts = [];
+  for (const [type, list] of Object.entries(byType)){
+    const mesh = new THREE.InstancedMesh(
+      new THREE.SphereGeometry(RADIUS[type], 12, 10),
+      new THREE.MeshStandardMaterial({
+        color:COLORS[type], roughness:.4,
+        emissive:COLORS[type], emissiveIntensity:.35}),
+      list.length);
+    const m = new THREE.Matrix4();
+    list.forEach((n, i) => {
+      m.makeTranslation(n.x, HEIGHTS[type], -n.y);
+      mesh.setMatrixAt(i, m);
+      stemPts.push(new THREE.Vector3(n.x, 0, -n.y),
+                   new THREE.Vector3(n.x, HEIGHTS[type], -n.y));
+    });
+    scene.add(mesh);
+  }
+  scene.add(new THREE.LineSegments(
+    new THREE.BufferGeometry().setFromPoints(stemPts),
+    new THREE.LineBasicMaterial({color:0x9aa4ac, transparent:true, opacity:.6})));
+}
+
+document.getElementById('shot').onclick = () => {
+  renderer.render(scene, camera);
+  const a = document.createElement('a');
+  a.download = 'urbangraph_bristol.png';
+  a.href = renderer.domElement.toDataURL('image/png');
+  a.click();
+};
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+(function loop(){
+  requestAnimationFrame(loop);
+  controls.update();
+  renderer.render(scene, camera);
+})();
+</script>
+</body>
+</html>

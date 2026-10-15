@@ -1,0 +1,310 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>UrbanGraph — Bristol prototype (extension v1: selectable assets)</title>
+<style>
+  :root{
+    --ink:#1e2a32; --panel:rgba(255,255,255,.94); --line:#c8ced4;
+    --cctv:#d64550; --light:#e8a13d; --aq:#3fa66a; --gw:#3d6fe8; --sel:#b03ac8;
+  }
+  html,body{margin:0;height:100%;overflow:hidden;
+    font:13px/1.45 "Segoe UI",system-ui,-apple-system,sans-serif;color:var(--ink)}
+  #app{position:fixed;inset:0}
+  .panel{position:absolute;background:var(--panel);border:1px solid var(--line);
+    border-radius:6px;padding:10px 14px;backdrop-filter:blur(4px)}
+  #title{top:14px;left:14px}
+  #title h1{margin:0;font-size:15px;font-weight:600;letter-spacing:.2px}
+  #title p{margin:2px 0 0;font-size:11.5px;color:#5a6772}
+  #legend{bottom:14px;left:14px}
+  #legend .row{display:flex;align-items:center;gap:8px;margin:3px 0}
+  #legend .dot{width:10px;height:10px;border-radius:50%}
+  #legend .note{margin-top:6px;font-size:10.5px;color:#5a6772;max-width:240px}
+  #shot{position:absolute;top:14px;right:14px;border:1px solid var(--line);
+    background:var(--panel);color:var(--ink);border-radius:6px;
+    padding:8px 14px;font:600 12.5px inherit;cursor:pointer}
+  #shot:hover{background:#fff}
+  #status{position:absolute;inset:0;display:flex;align-items:center;
+    justify-content:center;color:#5a6772;background:#e8ecef}
+  /* --- extension v1: asset information panel --- */
+  #asset{top:56px;right:14px;width:300px;max-height:calc(100% - 90px);
+    overflow:auto;display:none;font-size:12px}
+  #asset h2{margin:0 0 6px;font-size:13px;font-weight:600;word-break:break-all}
+  #asset .sec{margin:8px 0 2px;font-size:10.5px;font-weight:700;
+    text-transform:uppercase;letter-spacing:.4px;color:#5a6772}
+  #asset table{width:100%;border-collapse:collapse}
+  #asset td{padding:2px 4px;vertical-align:top;border-top:1px solid #e3e7ea}
+  #asset td:first-child{color:#5a6772;white-space:nowrap;width:38%}
+  #asset .reserved{color:#8a6d1a;background:#fdf6e3;border-radius:4px;
+    padding:6px 8px;margin:3px 0;font-size:11px}
+  #asset .warn{color:#9a3412}
+  #asset .close{position:absolute;top:6px;right:10px;cursor:pointer;
+    border:none;background:none;font-size:14px;color:#5a6772}
+  #hint{position:absolute;bottom:14px;right:14px;font-size:11px;color:#5a6772;
+    background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:6px 10px}
+</style>
+</head>
+<body>
+<div id="app"></div>
+<div id="status">Loading bristol_data_v1.json…</div>
+
+<div id="title" class="panel">
+  <h1>UrbanGraph · Bristol, UK — extension v1</h1>
+  <p>Selectable buildings · OSM IDs preserved · contract urbangraph-asset/v1</p>
+</div>
+
+<div id="legend" class="panel">
+  <div class="row"><span class="dot" style="background:var(--cctv)"></span>CCTV <span style="color:#5a6772">· Wi-Fi / Cellular</span></div>
+  <div class="row"><span class="dot" style="background:var(--light)"></span>Streetlight <span style="color:#5a6772">· NB-IoT / LoRaWAN</span></div>
+  <div class="row"><span class="dot" style="background:var(--aq)"></span>Air-quality sensor <span style="color:#5a6772">· LoRaWAN</span></div>
+  <div class="row"><span class="dot" style="background:var(--gw)"></span>Gateway <span style="color:#5a6772">· Cellular</span></div>
+  <div class="row"><span class="dot" style="background:var(--sel)"></span>Selected building</div>
+  <div class="note">Buildings &amp; roads: OpenStreetMap (ODbL) via Overpass. Node locations are
+    synthetic. Buildings tinted warm use generated fallback heights (not observed).
+    OSM way IDs are spatial feature IDs — not UPRNs.</div>
+</div>
+
+<div id="asset" class="panel">
+  <button class="close" id="assetClose" title="Close">✕</button>
+  <h2 id="assetId">—</h2>
+  <div id="assetBody"></div>
+</div>
+
+<div id="hint">Click a building to inspect it · click empty ground to deselect</div>
+
+<button id="shot" type="button">Save screenshot</button>
+
+<script type="importmap">
+{"imports":{
+  "three":"https://unpkg.com/three@0.160.0/build/three.module.js",
+  "three/addons/":"https://unpkg.com/three@0.160.0/examples/jsm/"
+}}
+</script>
+<script type="module">
+import * as THREE from 'three';
+import {OrbitControls} from 'three/addons/controls/OrbitControls.js';
+
+const COLORS = {cctv:0xd64550, streetlight:0xe8a13d, air_quality:0x3fa66a, gateway:0x3d6fe8};
+const HEIGHTS = {cctv:5, streetlight:7, air_quality:4, gateway:14};
+const RADIUS  = {cctv:2.4, streetlight:1.8, air_quality:1.8, gateway:3.2};
+const BUILDING_COLOR = 0xf7f8f9, SELECT_COLOR = 0xb03ac8, FALLBACK_COLOR = 0xe8ddc4;
+
+const app = document.getElementById('app');
+const renderer = new THREE.WebGLRenderer({antialias:true, preserveDrawingBuffer:true});
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+app.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0xe8ecef);
+scene.fog = new THREE.Fog(0xe8ecef, 900, 2600);
+
+const camera = new THREE.PerspectiveCamera(50, innerWidth/innerHeight, 1, 6000);
+camera.position.set(420, 380, 520);
+
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.target.set(0, 0, 0);
+controls.maxPolarAngle = Math.PI * 0.49;
+controls.enableDamping = true;
+
+scene.add(new THREE.HemisphereLight(0xffffff, 0xb9c2c9, 0.85));
+const sun = new THREE.DirectionalLight(0xffffff, 1.6);
+sun.position.set(-500, 700, 300);
+sun.castShadow = true;
+sun.shadow.mapSize.set(2048, 2048);
+Object.assign(sun.shadow.camera, {left:-900, right:900, top:900, bottom:-900, far:2500});
+scene.add(sun);
+
+const ground = new THREE.Mesh(
+  new THREE.PlaneGeometry(4000, 4000),
+  new THREE.MeshLambertMaterial({color:0xdde2e6}));
+ground.rotation.x = -Math.PI/2;
+ground.receiveShadow = true;
+ground.name = 'ground';
+scene.add(ground);
+
+let DATA = null;
+const buildingMeshes = [];   // extension v1: individual, identifiable meshes
+let selected = null;
+
+fetch('bristol_data_v1.json').then(r => {
+  if (!r.ok) throw new Error(r.status);
+  return r.json();
+}).then(data => {
+  if (data.contract_version !== 'urbangraph-asset/v1')
+    console.warn('Unexpected contract version:', data.contract_version);
+  DATA = data;
+  build(data);
+}).catch(() => {
+  document.getElementById('status').textContent =
+    'Could not load bristol_data_v1.json — run the extended fetch_bristol.py first, then serve this folder (python -m http.server).';
+});
+
+function footprintAreaM2(pts){
+  let a = 0;
+  for (let i=0;i<pts.length;i++){
+    const [x1,y1]=pts[i], [x2,y2]=pts[(i+1)%pts.length];
+    a += x1*y2 - x2*y1;
+  }
+  return Math.abs(a/2);
+}
+
+function build(data){
+  document.getElementById('status').remove();
+
+  // Buildings: ONE MESH PER BUILDING (extension v1 — enables identity & picking)
+  for (const b of data.buildings){
+    const pts = b.footprint.map(([x,y]) => new THREE.Vector2(x, y));
+    if (pts.length < 3) continue;
+    const shape = new THREE.Shape(pts);
+    const g = new THREE.ExtrudeGeometry(shape, {depth:b.height, bevelEnabled:false});
+    g.rotateX(-Math.PI/2);
+    const isFallback = b.height_source === 'synthetic_fallback';
+    const mesh = new THREE.Mesh(g, new THREE.MeshStandardMaterial({
+      color: isFallback ? FALLBACK_COLOR : BUILDING_COLOR,
+      roughness:.9, metalness:0}));
+    mesh.castShadow = mesh.receiveShadow = true;
+    mesh.userData.building = b;      // identity carried on the mesh
+    mesh.name = b.id;
+    scene.add(mesh);
+    buildingMeshes.push(mesh);
+  }
+
+  // Roads (unchanged rendering; IDs preserved in data)
+  const roadMat = new THREE.LineBasicMaterial({color:0x7a8590});
+  const roadPts = [];
+  for (const rd of data.roads)
+    for (let i=0;i<rd.path.length-1;i++){
+      roadPts.push(new THREE.Vector3(rd.path[i][0], .4, -rd.path[i][1]));
+      roadPts.push(new THREE.Vector3(rd.path[i+1][0], .4, -rd.path[i+1][1]));
+    }
+  scene.add(new THREE.LineSegments(
+    new THREE.BufferGeometry().setFromPoints(roadPts), roadMat));
+
+  // Nodes (unchanged rendering; synthetic flag in data)
+  const byType = {};
+  for (const n of data.nodes) (byType[n.type] ??= []).push(n);
+  const stemPts = [];
+  for (const [type, list] of Object.entries(byType)){
+    const mesh = new THREE.InstancedMesh(
+      new THREE.SphereGeometry(RADIUS[type], 12, 10),
+      new THREE.MeshStandardMaterial({
+        color:COLORS[type], roughness:.4,
+        emissive:COLORS[type], emissiveIntensity:.35}),
+      list.length);
+    const m = new THREE.Matrix4();
+    list.forEach((n, i) => {
+      m.makeTranslation(n.x, HEIGHTS[type], -n.y);
+      mesh.setMatrixAt(i, m);
+      stemPts.push(new THREE.Vector3(n.x, 0, -n.y),
+                   new THREE.Vector3(n.x, HEIGHTS[type], -n.y));
+    });
+    scene.add(mesh);
+  }
+  scene.add(new THREE.LineSegments(
+    new THREE.BufferGeometry().setFromPoints(stemPts),
+    new THREE.LineBasicMaterial({color:0x9aa4ac, transparent:true, opacity:.6})));
+
+  // test/automation hook: ?select=<osm:way/ID|first|withtags>
+  const sel = new URLSearchParams(location.search).get('select');
+  if (sel){
+    const target = sel === 'first' ? buildingMeshes[0]
+      : sel === 'withtags' ? buildingMeshes.find(m => m.userData.building.tags.name)
+      : buildingMeshes.find(m => m.name === sel);
+    if (target) selectBuilding(target);
+  }
+}
+
+/* ---------- extension v1: picking + asset panel ---------- */
+const raycaster = new THREE.Raycaster();
+const pointer = new THREE.Vector2();
+let downAt = null;
+
+renderer.domElement.addEventListener('pointerdown', e => { downAt = [e.clientX, e.clientY]; });
+renderer.domElement.addEventListener('pointerup', e => {
+  if (!downAt) return;
+  const moved = Math.hypot(e.clientX-downAt[0], e.clientY-downAt[1]);
+  downAt = null;
+  if (moved > 5) return;               // drag = camera move, not a click
+  pointer.x = (e.clientX / innerWidth) * 2 - 1;
+  pointer.y = -(e.clientY / innerHeight) * 2 + 1;
+  raycaster.setFromCamera(pointer, camera);
+  const hit = raycaster.intersectObjects(buildingMeshes, false)[0];
+  if (hit) selectBuilding(hit.object); else deselect();
+});
+
+function esc(s){ return String(s).replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c])); }
+
+function selectBuilding(mesh){
+  if (selected) selected.material.color.setHex(
+    selected.userData.building.height_source === 'synthetic_fallback' ? FALLBACK_COLOR : BUILDING_COLOR);
+  selected = mesh;
+  mesh.material.color.setHex(SELECT_COLOR);
+  const b = mesh.userData.building;
+  const p = DATA.provenance;
+  const area = footprintAreaM2(b.footprint);
+  const tagRows = Object.entries(b.tags)
+    .map(([k,v]) => `<tr><td>${esc(k)}</td><td>${esc(v)}</td></tr>`).join('');
+  const reserved = (name, field) =>
+    `<div class="reserved"><b>${name}</b> — reserved contract v1 field
+     (<code>${field}</code>), currently <code>${JSON.stringify(b[field])}</code>.
+     No lifecycle / DPP / federation system is connected in this extension.</div>`;
+  document.getElementById('assetId').textContent = b.id;
+  document.getElementById('assetBody').innerHTML = `
+    <div class="sec">Geometry-derived attributes</div>
+    <table>
+      <tr><td>height</td><td>${b.height} m
+        ${b.height_source==='synthetic_fallback'
+          ? '<span class="warn">⚠ generated fallback — not observed data</span>' : ''}</td></tr>
+      <tr><td>height source</td><td>${esc(b.height_source)}</td></tr>
+      <tr><td>footprint area</td><td>≈ ${area.toFixed(1)} m² (planar estimate)</td></tr>
+      <tr><td>footprint vertices</td><td>${b.footprint.length}</td></tr>
+    </table>
+    ${tagRows ? '<div class="sec">OSM tags</div><table>'+tagRows+'</table>' : ''}
+    <div class="sec">Provenance</div>
+    <table>
+      <tr><td>source</td><td>${esc(p.spatial_source)}</td></tr>
+      <tr><td>retrieved</td><td>${esc(DATA.generated_at)}</td></tr>
+      <tr><td>osm data timestamp</td><td>${esc(p.osm_data_timestamp)}</td></tr>
+      <tr><td>licence</td><td>${esc(p.licence)}</td></tr>
+      <tr><td>identity scope</td><td>OSM way id — spatial feature only, not a UPRN / legal asset id</td></tr>
+    </table>
+    <div class="sec">Federation extension points (contract ${esc(DATA.contract_version)})</div>
+    ${reserved('Lifecycle state', 'lifecycle')}
+    ${reserved('Product passport references', 'dpp_refs')}
+    ${reserved('Federation result / trace', 'federation')}`;
+  document.getElementById('asset').style.display = 'block';
+}
+
+function deselect(){
+  if (selected) selected.material.color.setHex(
+    selected.userData.building.height_source === 'synthetic_fallback' ? FALLBACK_COLOR : BUILDING_COLOR);
+  selected = null;
+  document.getElementById('asset').style.display = 'none';
+}
+document.getElementById('assetClose').onclick = deselect;
+
+document.getElementById('shot').onclick = () => {
+  renderer.render(scene, camera);
+  const a = document.createElement('a');
+  a.download = 'urbangraph_bristol_ext_v1.png';
+  a.href = renderer.domElement.toDataURL('image/png');
+  a.click();
+};
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+(function loop(){
+  requestAnimationFrame(loop);
+  controls.update();
+  renderer.render(scene, camera);
+})();
+</script>
+</body>
+</html>
